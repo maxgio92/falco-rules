@@ -1,8 +1,7 @@
 name: Release Rulesfile
 on:
   push:
-    tags:
-      - v*
+    branches: [ main ]
 
 jobs:
   release-rulesfile:
@@ -18,8 +17,8 @@ jobs:
       RULES_FILE: falco_rules.yaml
 
       OCI_REGISTRY: ghcr.io
-      ARTIFACT_NAME: ${{ github.repository }}
-      ARTIFACT_VERSION: ${{ github.ref_name }}
+      ARTIFACT_NAME: falco-rules
+      ARTIFACT_TAG: latest # or e.g. ${{ github.sha }}
 
     steps:
 
@@ -28,7 +27,9 @@ jobs:
         uses: actions/checkout@v3
         with:
           repository: falcosecurity/falcoctl
-          ref: v0.4.0
+          # It doesn't work with OIDC token authn to GHR. 
+          #ref: v0.4.0
+          ref: main
           path: falcoctl
       - name: Setup Golang
         uses: actions/setup-go@v4
@@ -39,6 +40,7 @@ jobs:
       - name: Build falcoctl
         run: make
         working-directory: falcoctl
+      - run: falcoctl/falcoctl version
 
       # Get the rules
       - name: Checkout Rules Repo
@@ -52,21 +54,33 @@ jobs:
              falcoctl/falcoctl registry push \
              --config /dev/null \
              --type rulesfile \
-             --version ${ARTIFACT_VERSION} \
-             ${OCI_REGISTRY}/${ARTIFACT_NAME}:${ARTIFACT_VERSION} \
-             rules/${RULES_FILE}             
+             --version ${ARTIFACT_TAG} \
+             ${OCI_REGISTRY}/${{ github.repository }}/${ARTIFACT_NAME}:${ARTIFACT_TAG} \
+             rules/rules/${RULES_FILE}             
         env:
-          FALCOCTL_REGISTRY_AUTH_BASIC: ${{ env.OCI_REGISTRY }},${{ github.repository_owner }},${{ secrets.GITHUB_TOKEN }}
+          FALCOCTL_REGISTRY_AUTH_BASIC: ${{ env.OCI_REGISTRY }},${{ github.actor }},${{ secrets.GITHUB_TOKEN }}
+
+      # Get the OCI artifact digest
+      - name: Setup Crane
+        uses: imjasonh/setup-crane@v0.1
+      - run: crane version
+      - name: Get the artifact digest
+        id: get_artifact_digest
+        run: >-
+          echo "::set-output name=ARTIFACT_DIGEST::$(
+            crane digest ${OCI_REGISTRY}/${{ github.repository }}/${ARTIFACT_NAME}:${ARTIFACT_TAG}
+          )"
 
       # Create an signature of the rules artifact as OCI artifact
       - name: Install Cosign
         uses: sigstore/cosign-installer@main
         with:
-          cosign-release: 'v2.0.2' 
+          cosign-release: 'v2.0.2'
       - run: cosign version
       - name: Sign the images with GitHub OIDC Token
         env:
           # Add support for OCI v1.1
-          COSIGN_EXPERIMENTAL: "1"
-        run: cosign sign ${OCI_REGISTRY}/${ARTIFACT_NAME}:${ARTIFACT_VERSION}
+          COSIGN_EXPERIMENTAL: 1
+          ARTIFACT_DIGEST: "${{ steps.get_artifact_digest.outputs.ARTIFACT_DIGEST }}"
+        run: cosign sign --yes ${OCI_REGISTRY}/${{ github.repository }}/${ARTIFACT_NAME}@${ARTIFACT_DIGEST}
 
