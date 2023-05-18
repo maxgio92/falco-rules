@@ -1,14 +1,17 @@
 name: Release Rulesfile
+
 on:
   push:
-    branches: [ main ]
+    tags:
+      # potential semver
+      - '[a-z]*[0-9]+.[0-9]+.[0-9]+*'
 
 jobs:
   release-rulesfile:
     runs-on: ubuntu-latest
 
-    # These permissions are needed to interact with GitHub's OIDC Token endpoint.
     permissions:
+      # These permissions are needed to interact with GitHub's OIDC Token endpoint.
       id-token: write
       contents: read
       packages: write
@@ -18,60 +21,39 @@ jobs:
 
       OCI_REGISTRY: ghcr.io
       ARTIFACT_NAME: falco-rules
-      ARTIFACT_TAG: latest # or e.g. ${{ github.sha }}
 
     steps:
 
-      # Get falcoctl
-      - name: Checkout Falcoctl Repo
+      # Get rules repository
+      - name: Checkout Rules
         uses: actions/checkout@v3
-        with:
-          repository: falcosecurity/falcoctl
-          # It doesn't work with OIDC token authn to GHR. 
-          #ref: v0.4.0
-          ref: main
-          path: falcoctl
+
+      # Get registry artifact tool
       - name: Setup Golang
-        uses: actions/setup-go@v4
+        uses: actions/setup-go@v3
         with:
-          go-version-file: falcoctl/go.mod
-          cache-dependency-path: falcoctl/go.sum
-      - run: go version
-      - name: Build falcoctl
-        run: make
-        working-directory: falcoctl
-      - run: falcoctl/falcoctl version
-
-      # Get the rules
-      - name: Checkout Rules Repo
-        uses: actions/checkout@v3
-        with:
-          path: rules
-
-      # Upload the rules artifact with falcoctl
-      - name: Upload OCI artifacts to GitHub packages
+          go-version-file: build/registry/go.mod
+      - name: Build registry artifact tool
+        working-directory: build/registry
+        run: go build -o rules-registry ./...
+      - name: Get lowercase OCI repo prefix
         run: |
-             falcoctl/falcoctl registry push \
-             --config /dev/null \
-             --type rulesfile \
-             --version ${ARTIFACT_TAG} \
-             ${OCI_REGISTRY}/${{ github.repository }}/${ARTIFACT_NAME}:${ARTIFACT_TAG} \
-             rules/rules/${RULES_FILE}             
+          echo "OCI_REPO_PREFIX=ghcr.io/${GITHUB_REPOSITORY,,}" >>${GITHUB_ENV}
+      - name: Upload OCI artifacts to GitHub packages
+        id: oci_build
         env:
-          FALCOCTL_REGISTRY_AUTH_BASIC: ${{ env.OCI_REGISTRY }},${{ github.actor }},${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.repository_owner }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPO_URL: ${{ github.server_url }}/${{ github.repository }}.git
 
-      # Get the OCI artifact digest
-      - name: Setup Crane
-        uses: imjasonh/setup-crane@v0.1
-      - run: crane version
-      - name: Get the artifact digest
-        id: get_artifact_digest
+        # uses OCI_REPO_PREFIX environment variable
         run: >-
           echo "::set-output name=ARTIFACT_DIGEST::$(
-            crane digest ${OCI_REGISTRY}/${{ github.repository }}/${ARTIFACT_NAME}:${ARTIFACT_TAG}
+            build/registry/rules-registry push-to-oci registry.yaml ${{ github.ref_name }}
           )"
+      - run: "echo ${{ steps.oci_build.outputs.ARTIFACT_DIGEST }}"
 
-      # Create an signature of the rules artifact as OCI artifact
+      # Create a signature of the rules artifact as OCI artifact
       - name: Install Cosign
         uses: sigstore/cosign-installer@main
         with:
@@ -81,6 +63,5 @@ jobs:
         env:
           # Add support for OCI v1.1
           COSIGN_EXPERIMENTAL: 1
-          ARTIFACT_DIGEST: "${{ steps.get_artifact_digest.outputs.ARTIFACT_DIGEST }}"
-        run: cosign sign --yes ${OCI_REGISTRY}/${{ github.repository }}/${ARTIFACT_NAME}@${ARTIFACT_DIGEST}
+        run: cosign sign --yes ${OCI_REGISTRY}/${{ github.repository }}/${ARTIFACT_NAME}@${{ steps.oci_build.outputs.ARTIFACT_DIGEST }}
 
